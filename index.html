@@ -66,7 +66,7 @@ var camYTarget = 0;
 
 var swingT   = 0;
 var swingAmp = 90;
-var swingSpd = 0.024;
+var swingSpd = 0.038;   // faster swing
 
 var falling  = false;
 var fallX    = 0;
@@ -75,6 +75,16 @@ var fallW    = 130;
 var fallSpd  = 0;
 var fallTilt = 0;
 var fallTiltV= 0;
+
+// trail
+var fallTrail = [];   // [{x,y,alpha}]
+
+// screen shake
+var shakeX = 0, shakeY = 0, shakeMag = 0;
+
+// squash/stretch on land
+var landSquash = 0;   // 0=normal, positive=squash frames remaining
+var landBlock_idx = -1; // which tower block is squashing
 
 var parts    = [];
 var bgB      = [];
@@ -378,7 +388,23 @@ function drawTower() {
     var blk = tower[i];
     var by  = FLOOR_Y() - (i+1)*bh + camY;
     if (by > H+10 || by < -bh-10) continue;
-    drawBlock(blk.x, by, blk.w, bh, 0, 1);
+
+    // squash top block on landing
+    var drawBh = bh;
+    var drawBy = by;
+    var drawBx = blk.x;
+    var drawBw = blk.w;
+    if (i === tower.length-1 && landSquash > 0) {
+      var sq = (landSquash / 10);           // 1→0
+      var squashY  = sq * bh * 0.18;        // compress vertically
+      var squashX  = sq * blk.w * 0.08;     // expand horizontally
+      drawBh = bh - squashY;
+      drawBy = by + squashY;
+      drawBx = blk.x - squashX;
+      drawBw = blk.w + squashX*2;
+    }
+
+    drawBlock(drawBx, drawBy, drawBw, drawBh, 0, 1);
   }
 }
 
@@ -386,28 +412,52 @@ function drawTower() {
 function spawnStars(x, y, n) {
   for (var i = 0; i < n; i++) {
     var a = Math.random() * Math.PI * 2;
-    var s = 2 + Math.random() * 4;
-    parts.push({ x:x, y:y, vx:Math.cos(a)*s, vy:Math.sin(a)*s-3,
+    var s = 3 + Math.random() * 5;
+    parts.push({ x:x, y:y, vx:Math.cos(a)*s, vy:Math.sin(a)*s-4,
       life:40, max:40, type:'star', col:'#ffe040' });
   }
 }
 
 function spawnChunks(x, y, w) {
   var bh = BLK_H();
-  for (var i = 0; i < 12; i++) {
+  for (var i = 0; i < 16; i++) {
     var a = Math.random() * Math.PI * 2;
-    var s = 3 + Math.random() * 5;
-    var cols = ['#c08010','#e09820','#9a6408'];
+    var s = 4 + Math.random() * 7;
+    var cols = ['#c08010','#e09820','#9a6408','#d8c080'];
     parts.push({ x:x+Math.random()*w, y:y+bh/2,
-      vx:Math.cos(a)*s, vy:Math.sin(a)*s-4,
-      life:50, max:50, type:'chunk',
-      col:cols[i%3], cw:8+Math.random()*8, ch:10+Math.random()*10 });
+      vx:Math.cos(a)*s, vy:Math.sin(a)*s-6,
+      life:55, max:55, type:'chunk',
+      col:cols[i%4], cw:8+Math.random()*10, ch:10+Math.random()*12 });
+  }
+}
+
+function spawnDust(x, y, w) {
+  for (var i = 0; i < 12; i++) {
+    var side = (i % 2 === 0) ? 1 : -1;
+    var s = 1.5 + Math.random() * 3;
+    parts.push({ x:x + Math.random()*w, y:y,
+      vx: side * (0.5 + Math.random()*3),
+      vy: -(0.5 + Math.random()*2),
+      life:40, max:40, type:'dust',
+      r: Math.round(W*0.018) + Math.random()*Math.round(W*0.022) });
+  }
+}
+
+function spawnImpactLines(x, y, w) {
+  var cx = x + w/2;
+  for (var i = 0; i < 8; i++) {
+    var a = Math.PI + (Math.random() - 0.5) * Math.PI;
+    var len = Math.round(W*0.04) + Math.random()*Math.round(W*0.06);
+    parts.push({ x:cx, y:y,
+      vx:Math.cos(a)*4, vy:Math.sin(a)*4,
+      life:14, max:14, type:'line',
+      len:len, angle:a });
   }
 }
 
 function spawnText(x, y, txt, col, sz) {
-  parts.push({ x:x, y:y, vx:0, vy:-1.2,
-    life:65, max:65, type:'txt', txt:txt,
+  parts.push({ x:x, y:y, vx:0, vy:-1.5,
+    life:70, max:70, type:'txt', txt:txt,
     col:col||'#ffe040', sz:sz||Math.round(H*0.026) });
 }
 
@@ -437,6 +487,18 @@ function drawStar5(x, y, r, col) {
   ctx.fill();
 }
 
+function drawTrail() {
+  for (var i = 0; i < fallTrail.length; i++) {
+    var t = fallTrail[i];
+    var a = t.alpha * 0.35;
+    ctx.save();
+    ctx.globalAlpha = a;
+    ctx.fillStyle = '#e09820';
+    ctx.fillRect((t.x)*SCALE, (t.y)*SCALE, t.w*SCALE, BLK_H()*SCALE);
+    ctx.restore();
+  }
+}
+
 function drawParts() {
   for (var i = 0; i < parts.length; i++) {
     var p = parts[i];
@@ -444,14 +506,28 @@ function drawParts() {
     ctx.save();
     ctx.globalAlpha = alpha;
     if (p.type === 'star') {
-      drawStar5(p.x*SCALE, p.y*SCALE, Math.round(W*0.012)*SCALE, p.col);
+      drawStar5(p.x*SCALE, p.y*SCALE, Math.round(W*0.016)*SCALE, p.col);
     } else if (p.type === 'chunk') {
       ctx.fillStyle = p.col;
       ctx.save();
       ctx.translate(p.x*SCALE, p.y*SCALE);
-      ctx.rotate(p.life * 0.06);
+      ctx.rotate(p.life * 0.08);
       ctx.fillRect(-p.cw/2*SCALE, -p.ch/2*SCALE, p.cw*SCALE, p.ch*SCALE);
       ctx.restore();
+    } else if (p.type === 'dust') {
+      var progress = 1 - alpha;
+      var rr = p.r * (1 + progress*1.5) * SCALE;
+      ctx.fillStyle = 'rgba(180,160,100,' + (alpha*0.55) + ')';
+      ctx.beginPath();
+      ctx.arc(p.x*SCALE, p.y*SCALE, rr, 0, Math.PI*2);
+      ctx.fill();
+    } else if (p.type === 'line') {
+      ctx.strokeStyle = '#ffe080';
+      ctx.lineWidth = Math.max(1, Math.round(W*0.006)*SCALE * alpha);
+      ctx.beginPath();
+      ctx.moveTo(p.x*SCALE, p.y*SCALE);
+      ctx.lineTo((p.x + Math.cos(p.angle)*p.len)*SCALE, (p.y + Math.sin(p.angle)*p.len)*SCALE);
+      ctx.stroke();
     } else if (p.type === 'txt') {
       ctx.font = 'bold ' + Math.round(p.sz*SCALE) + 'px Arial';
       ctx.fillStyle = 'rgba(0,0,0,0.4)';
@@ -627,9 +703,12 @@ function startGame() {
   camY     = 0;
   camYTarget = 0;
   parts    = [];
+  fallTrail = [];
+  shakeMag = 0;
+  landSquash = 0;
   blockW   = BLK_W();
   swingAmp = W * 0.26;
-  swingSpd = 0.024;
+  swingSpd = 0.038;
   swingT   = 0;
   falling  = false;
 }
@@ -642,23 +721,46 @@ function doFire() {
   if (state === STATE_MENU) { startGame(); return; }
   if (state === STATE_DEAD) { state = STATE_MENU; return; }
   if (falling) return;
-  falling  = true;
-  fallX    = getSwingX() - blockW/2;
-  fallY    = CRANE_Y() + 4;
-  fallW    = blockW;
-  fallSpd  = H * 0.004;
-  fallTilt = 0;
-  fallTiltV= 0;
+  falling   = true;
+  fallX     = getSwingX() - blockW/2;
+  fallY     = CRANE_Y() + 4;
+  fallW     = blockW;
+  fallSpd   = H * 0.010;   // starts fast
+  fallTilt  = 0;
+  fallTiltV = 0;
+  fallTrail = [];
 }
 
 function update() {
   swingT += swingSpd;
 
+  // shake decay
+  if (shakeMag > 0.1) {
+    shakeMag *= 0.72;
+    shakeX = (Math.random()-0.5) * shakeMag;
+    shakeY = (Math.random()-0.5) * shakeMag;
+  } else {
+    shakeMag = 0; shakeX = 0; shakeY = 0;
+  }
+
+  // squash decay
+  if (landSquash > 0) landSquash--;
+
   if (falling) {
-    fallSpd = Math.min(fallSpd + H*0.0006, H*0.018);
+    // faster acceleration, higher cap
+    fallSpd = Math.min(fallSpd + H*0.0016, H*0.032);
     fallY  += fallSpd;
-    fallTiltV += 0.0004;
+
+    // slight tilt from swing momentum
+    fallTiltV += 0.0005;
     fallTilt  += fallTiltV;
+
+    // trail: record every 2px of movement
+    fallTrail.push({ x: fallX, y: fallY, w: fallW, alpha: 1 });
+    if (fallTrail.length > 6) fallTrail.shift();
+    for (var ti = 0; ti < fallTrail.length; ti++) {
+      fallTrail[ti].alpha = (ti+1) / fallTrail.length;
+    }
 
     var bh = BLK_H();
     var landY = towerTopY() - bh;
@@ -674,13 +776,12 @@ function update() {
   }
 
   updateParts();
-
   if (comboT > 0) { comboT--; } else { combo = 0; }
 
   // camera scroll
   var bh2 = BLK_H();
   camYTarget = Math.max(0, tower.length*bh2 - H*0.52);
-  camY += (camYTarget - camY) * 0.055;
+  camY += (camYTarget - camY) * 0.07;
 }
 
 function land() {
@@ -701,10 +802,17 @@ function land() {
   var right   = Math.min(bx+bw, prevX+prevW);
   var overlap = right - left;
 
+  // always spawn dust + impact on landing
+  spawnDust(left, fallY, overlap > 0 ? overlap : bw);
+  spawnImpactLines(left, fallY, overlap > 0 ? overlap : bw);
+  shakeMag = 8;
+
   if (overlap <= Math.round(W*0.018)) {
     spawnChunks(fallX, fallY, fallW);
     spawnText(W/2-Math.round(W*0.10), H/2-Math.round(H*0.10),
       'MISS!', '#ff3020', Math.round(H*0.044));
+    shakeMag = 20;
+    fallTrail = [];
     miss();
     return;
   }
@@ -717,12 +825,13 @@ function land() {
   if (trim < Math.round(W*0.014)) {
     combo++;
     comboT = 120;
-    spawnStars(newX + newW/2, fallY, 12);
+    spawnStars(newX + newW/2, fallY, 14);
     if (combo > 1) {
-      spawnText(W/2-Math.round(W*0.14), fallY - Math.round(H*0.04),
-        'COMBO x'+combo, '#ff8030', Math.round(H*0.036));
+      spawnText(W/2-Math.round(W*0.14), fallY - Math.round(H*0.05),
+        'COMBO x'+combo, '#ff8030', Math.round(H*0.040));
     }
     pts = (30 + combo*15) * level;
+    shakeMag = 14;
   } else {
     combo = 0;
     pts = Math.round(newW * level * 0.35);
@@ -730,21 +839,24 @@ function land() {
 
   score += pts;
   spawnText(newX+newW/2-Math.round(W*0.06), fallY-Math.round(H*0.02),
-    '+'+pts, '#ffe040', Math.round(H*0.028));
+    '+'+pts, '#ffe040', Math.round(H*0.030));
 
   tower.push({ x: newX, w: newW });
+  landSquash = 10;   // squash the top block for 10 frames
+  landBlock_idx = tower.length - 1;
   blockW = newW;
   if (score > hiScore) hiScore = score;
 
   if (tower.length % 8 === 0) {
     level++;
     blockW   = Math.min(blockW + Math.round(W*0.018), BLK_W());
-    swingSpd = Math.min(swingSpd + 0.0028, 0.055);
+    swingSpd = Math.min(swingSpd + 0.003, 0.060);
     swingAmp = Math.max(swingAmp - W*0.014, W*0.10);
     spawnText(W/2-Math.round(W*0.11), H/2-Math.round(H*0.06),
       'LEVEL '+level, '#80ffff', Math.round(H*0.048));
   }
 
+  fallTrail = [];
   falling = false;
 }
 
@@ -767,6 +879,10 @@ function loop() {
     updateParts();
   }
 
+  // apply shake offset via canvas transform
+  ctx.save();
+  ctx.translate(Math.round(shakeX*SCALE), Math.round(shakeY*SCALE));
+
   // draw
   drawSky();
   drawBg();
@@ -776,11 +892,14 @@ function loop() {
   if (state === STATE_PLAY) {
     var hx = falling ? fallX + fallW/2 : getSwingX();
     drawCrane(hx, CRANE_Y());
+
     if (!falling) {
-      var bw = blockW;
-      var bh = BLK_H();
-      drawBlock(getSwingX()-bw/2, CRANE_Y()+2, bw, bh, 0, 1);
+      var bw2 = blockW;
+      var bh2 = BLK_H();
+      drawBlock(getSwingX()-bw2/2, CRANE_Y()+2, bw2, bh2, 0, 1);
     } else {
+      // draw motion trail first (behind block)
+      drawTrail();
       drawBlock(fallX, fallY, fallW, BLK_H(), fallTilt, 1);
     }
     drawHUD();
@@ -791,6 +910,7 @@ function loop() {
   }
 
   drawParts();
+  ctx.restore();
   requestAnimationFrame(loop);
 }
 
